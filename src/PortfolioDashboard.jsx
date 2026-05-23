@@ -100,32 +100,48 @@ const GEO_COLORS    = ["#378ADD","#1D9E75","#7F77DD","#D85A30","#BA7517","#5DCAA
 const SECTOR_COLORS = ["#378ADD","#1D9E75","#7F77DD","#D85A30","#BA7517","#5DCAA5","#AFA9EC","#FAC775","#B5D4F4","#D3D1C7"];
 const CCY_COLORS    = { USD: "#378ADD", EUR: "#1D9E75", SGD: "#FAC775" };
 
-// ─── Latest known prices — update these when you get new quotes ──────────────
+// ─── Fallback prices (used if live fetch fails) ───────────────────────────────
 // Last updated: 22 May 2026
-const LATEST_PRICES = {
+const FALLBACK_PRICES = {
   prices: {
-    ibkr_spyi:  11.01,   // SPYI Xetra — May 22 2026
-    ibkr_emim:  47.04,   // EMIM Euronext — May 22 2026
-    ibkr_vwcg:  56.63,   // VWCG Xetra — May 22 2026
-    bond_31ig:  5.0276,  // iBonds 31IG — Oct 2025 (update from IBKR)
-    bond_32xg:  4.9947,  // iBonds 32XG — Oct 2025 (update from IBKR)
-    bond_33gi:  4.9675,  // iBonds 33GI — Oct 2025 (update from IBKR)
-    bond_34gi:  4.9601,  // iBonds 34GI — Oct 2025 (update from IBKR)
-    bond_35ai:  4.9567,  // iBonds 35AI — Oct 2025 (update from IBKR)
-    rsu_mar:    369.92,  // MAR NASDAQ — May 22 2026
-    k401_nav:   7.1610,  // MRS iShares World Eq Indx Fd USD Cl8 — May 21 2026
-    srs_nav:    12.00,   // PIMCO GIS Income Fund SGD-Hedged — May 21 2026
-    jtc_nav:    28.00,   // PIMCO GIS Global Bond Inst Hdg Acc EUR — May 22 2026
+    ibkr_spyi:  11.01,
+    ibkr_emim:  47.04,
+    ibkr_vwcg:  56.63,
+    bond_31ig:  5.0276,
+    bond_32xg:  4.9947,
+    bond_33gi:  4.9675,
+    bond_34gi:  4.9601,
+    bond_35ai:  4.9567,
+    rsu_mar:    369.92,
+    k401_nav:   7.1610,
+    srs_nav:    12.00,
+    jtc_nav:    28.00,
   },
-  fx: {
-    USD: 1.1615,  // EUR/USD — May 22 2026
-    SGD: 1.4840,  // EUR/SGD — May 22 2026
-  },
+  fx: { USD: 1.1615, SGD: 1.4840 },
   timestamp: "2026-05-22T09:00:00.000Z",
 };
 
-function fetchLivePrices() {
-  return Promise.resolve(LATEST_PRICES);
+// ─── Live price fetcher — calls Vercel serverless proxy → Yahoo Finance ────────
+async function fetchLivePrices() {
+  const resp = await fetch('/api/prices');
+  if (!resp.ok) throw new Error(`API returned ${resp.status}`);
+  const live = await resp.json();
+  if (live.error) throw new Error(live.error);
+
+  // Merge live prices with fallback for any nulls (k401_nav, srs_nav, jtc_nav)
+  const merged = { ...FALLBACK_PRICES.prices };
+  for (const [k, v] of Object.entries(live.prices || {})) {
+    if (v != null) merged[k] = v;
+  }
+
+  return {
+    prices: merged,
+    fx: {
+      USD: live.fx?.USD ?? FALLBACK_PRICES.fx.USD,
+      SGD: live.fx?.SGD ?? FALLBACK_PRICES.fx.SGD,
+    },
+    timestamp: live.timestamp || new Date().toISOString(),
+  };
 }
 
 // ─── Tooltip ──────────────────────────────────────────────────────────────────
@@ -322,6 +338,14 @@ export default function PortfolioDashboard() {
   useEffect(() => {
     if (!loading && priceStatus === "idle") refreshPrices();
   }, [loading]);
+
+  // Auto-refresh if prices are stale (> 4 hours old)
+  useEffect(() => {
+    if (!loading && priceStatus === "ok" && priceTime) {
+      const ageHours = (Date.now() - new Date(priceTime).getTime()) / 3600000;
+      if (ageHours > 4) refreshPrices();
+    }
+  }, [loading, priceStatus]);
 
   // ── Compute EUR values from shares × price ────────────────────────────────
   const liveValues = useMemo(() => {
@@ -605,16 +629,16 @@ export default function PortfolioDashboard() {
         <div style={{ width:8, height:8, borderRadius:"50%", flexShrink:0,
           background: priceStatus==="ok" ? "#1D9E75" : priceStatus==="fetching" ? "#BA7517" : priceStatus==="error" ? "#D85A30" : "#888" }} />
         <div style={{ flex:1, fontSize:11, color:"var(--color-text-secondary)" }}>
-          {priceStatus==="fetching" && "Applying prices…"}
-          {priceStatus==="ok"       && `Prices as of ${priceTime ? new Date(priceTime).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}) : "—"} · FX: 1 EUR = ${(1/fx.USD).toFixed(4)} USD = ${(1/fx.SGD).toFixed(4)} SGD · ask Claude to update prices for latest quotes`}
-          {priceStatus==="error"    && `Failed to apply prices: ${priceError}`}
-          {priceStatus==="idle"     && "Prices not yet loaded"}
+          {priceStatus==="fetching" && "Fetching live prices…"}
+          {priceStatus==="ok"       && `Live prices · ${priceTime ? new Date(priceTime).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"}) + " " + new Date(priceTime).toLocaleDateString("en-GB",{day:"numeric",month:"short"}) : "—"} · 1 EUR = ${(1/fx.USD).toFixed(4)} USD = ${(1/fx.SGD).toFixed(4)} SGD`}
+          {priceStatus==="error"    && `Using fallback prices (${priceError}) · FX: 1 EUR = ${(1/fx.USD).toFixed(4)} USD`}
+          {priceStatus==="idle"     && "Loading prices…"}
         </div>
         <button onClick={refreshPrices} disabled={priceStatus==="fetching"}
           style={{ fontSize:11, padding:"4px 10px", cursor:"pointer", borderRadius:6,
             border:"0.5px solid var(--color-border-secondary)", background:"transparent",
             color:"var(--color-text-secondary)", opacity: priceStatus==="fetching" ? 0.5 : 1 }}>
-          {priceStatus==="fetching" ? "…" : "Apply prices ↻"}
+          {priceStatus==="fetching" ? "…" : "Refresh ↻"}
         </button>
       </div>
 
