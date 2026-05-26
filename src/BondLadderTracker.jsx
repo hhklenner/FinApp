@@ -19,10 +19,6 @@ const INITIAL_RUNGS = [
 const SEED_SHARES = { "31IG": 3000, "32XG": 3000, "33GI": 3600, "34GI": 4000, "35AI": 4000 };
 const SEED_PRICES = { "31IG": 5.0276, "32XG": 4.9947, "33GI": 4.9675, "34GI": 4.9601, "35AI": 4.9567 };
 
-// JTC pension: €83,143 total across two PIMCO GIS Global Bond tranches
-// Expected payout Q1 2026, to be deployed into the bond ladder
-const JTC_PENSION_EUR = 83143;
-
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 function targetPayout(idx) {
@@ -58,7 +54,7 @@ function ProgressBar({ pct, color, targetVal, currentVal, shares }) {
         <span style={{ fontWeight: 500, color: over ? "var(--color-text-success)" : pct > 60 ? "var(--color-text-primary)" : "var(--color-text-warning)" }}>
           {Math.round(pct)}%{over ? " ✓" : ""}
         </span>
-        <span>PV target €{Math.round(targetVal).toLocaleString()}</span>
+        <span>Target {Math.round(targetVal/5).toLocaleString()} shares @ €5 = €{Math.round(targetVal).toLocaleString()}</span>
       </div>
       <div style={{ height: 8, background: "var(--color-background-secondary)", borderRadius: 4, overflow: "hidden" }}>
         <div style={{ height: "100%", width: `${clamped}%`,
@@ -121,22 +117,25 @@ export default function BondLadderTracker() {
     const sh  = shares[r.id] || 0;
     const pr  = prices[r.id] || 0;
     const val = sh * pr;
-    const pv  = pvNeeded(i, r.maturityYear, asOfYear);
     const tp  = targetPayout(i);
-    const pct = pv > 0 ? (val / pv) * 100 : 0;
-    const shortfall = Math.max(0, pv - val);
+    // Target = shares needed at €5 nominal par — simple, no PV discounting
+    const sharesTarget = Math.ceil(tp / 5.0);
+    const nominalTarget = sharesTarget * 5.0;
+    const pct = nominalTarget > 0 ? (sh / sharesTarget) * 100 : 0;
+    const sharesNeeded = Math.max(0, sharesTarget - sh);
+    const shortfall = sharesNeeded * 5.0; // nominal shortfall
     const mths = Math.max(0, (r.maturityYear - asOfYear) * 12);
-    const monthlyNeeded  = shortfall > 0 && mths > 0 ? Math.round(shortfall / mths) : 0;
-    const sharesNeeded   = pr > 0 ? Math.ceil(shortfall / pr) : 0;
-    return { ...r, i, sh, pr, val, pv, tp, pct, shortfall, mths: Math.round(mths), monthlyNeeded, sharesNeeded };
+    const monthlyNeeded = shortfall > 0 && mths > 0 ? Math.round(shortfall / mths) : 0;
+    return { ...r, i, sh, pr, val, tp, pv: nominalTarget, pct, shortfall, sharesTarget, sharesNeeded, mths: Math.round(mths), monthlyNeeded };
   });
 
-  const totalPV    = rungs.reduce((s, r) => s + r.pv,  0);
-  const totalVal   = rungs.reduce((s, r) => s + r.val, 0);
-  const totalShort = rungs.reduce((s, r) => s + r.shortfall, 0);
+  const totalPV    = rungs.reduce((s, r) => s + r.pv,  0);   // nominal target (shares × €5)
+  const totalVal   = rungs.reduce((s, r) => s + r.val, 0);   // market value (shares × live price)
+  const totalShort = rungs.reduce((s, r) => s + r.shortfall, 0); // nominal shortfall
+  const totalSharesNeeded = rungs.reduce((s, r) => s + r.sharesNeeded, 0);
   const monthsLeft = Math.round((2032 - asOfYear) * 12);
-  const jtcFuture  = asOfYear < 2026.5 ? JTC_PENSION_EUR : 0;
-  const netPos     = totalVal + monthsLeft * MONTHLY_BUDGET + jtcFuture - totalPV;
+  // On track = can we buy remaining shares with remaining monthly budget?
+  const netPos     = monthsLeft * MONTHLY_BUDGET - totalShort;
   const onTrack    = netPos >= 0;
 
   function shareHistory(id) {
@@ -208,34 +207,61 @@ export default function BondLadderTracker() {
 
 
   // ── Progress chart ──────────────────────────────────────────────────────
+  // Three lines: Actual (from logged buys), Expected (€4k/mth), Required (linear to full funding Dec 2031)
   const progressData = useMemo(() => {
-    const START = 2025 + 9/12; // Oct 2025
+    const START = 2026 + 4/12; // May 2026 — current baseline
+    const START_DATE = new Date(2026, 4, 1); // May 1 2026
+    const END_DATE   = new Date(2031, 11, 1); // Dec 2031 — ladder must be fully funded
+    const totalMonths = Math.round((2032 - START) * 12);
+
+    // Nominal total target = all shares needed × €5
+    const nominalTotal = INITIAL_RUNGS.reduce((s, r, i) => {
+      return s + Math.ceil(targetPayout(i) / 5.0) * 5.0;
+    }, 0);
+
+    // Current actual value from seed shares
     const seedVal = Object.entries(SEED_SHARES).reduce((s,[id,sh]) => s + sh*(SEED_PRICES[id]||0), 0);
+    // Current nominal funded = seed shares × €5
+    const seedNominal = Object.entries(SEED_SHARES).reduce((s,[id,sh]) => s + sh*5.0, 0);
+
     const events = [...history]
       .filter(h => h.pricesAfter && h.sharesAfter)
       .sort((a,b) => new Date(a.date)-new Date(b.date));
-    const totalMonths = Math.round((2032 - START) * 12);
-    let expectedVal = seedVal;
+
+    let expectedNominal = seedNominal;
     const out = [];
+
     for (let m = 0; m <= totalMonths; m++) {
-      const y  = START + m/12;
-      const dt = new Date(2025, 9+m, 1);
+      const dt = new Date(2026, 4 + m, 1);
       const label = dt.toLocaleDateString("en-GB",{month:"short",year:"2-digit"});
+
       if (m > 0) {
-        expectedVal = expectedVal*(1+FI_RATE/12) + MONTHLY_BUDGET;
-        if (m === 5) expectedVal += JTC_PENSION_EUR; // JTC Mar 2026
+        // Expected: buy €4k/month worth of shares at ~€5 ≈ 800 shares/month × €5
+        expectedNominal = Math.min(nominalTotal, expectedNominal + MONTHLY_BUDGET);
       }
+
+      // Required: linear path from seedNominal today to nominalTotal by Dec 2031
+      const requiredNominal = Math.min(nominalTotal,
+        seedNominal + (nominalTotal - seedNominal) * (m / totalMonths)
+      );
+
+      // Actual: from logged history
       const eventsBefore = events.filter(e => new Date(e.date) <= dt);
-      let actualVal = null;
+      let actualNominal = null;
       if (eventsBefore.length > 0) {
         const latest = eventsBefore[eventsBefore.length-1];
-        actualVal = Object.entries(latest.sharesAfter||{}).reduce((s,[id,sh]) =>
-          s + sh*(latest.pricesAfter?.[id]||SEED_PRICES[id]||0), 0);
+        actualNominal = Object.entries(latest.sharesAfter||{}).reduce((s,[id,sh]) => s + sh*5.0, 0);
       } else if (m === 0) {
-        actualVal = seedVal;
+        actualNominal = seedNominal;
       }
-      const targetVal = INITIAL_RUNGS.reduce((s,r,i) => s+pvNeeded(i,r.maturityYear,y), 0);
-      out.push({ label, y, expected:Math.round(expectedVal), actual:actualVal!=null?Math.round(actualVal):null, target:Math.round(targetVal), isJTC:m===5 });
+
+      out.push({
+        label,
+        expected: Math.round(expectedNominal),
+        required: Math.round(requiredNominal),
+        actual: actualNominal != null ? Math.round(actualNominal) : null,
+        target: Math.round(nominalTotal),
+      });
     }
     return out;
   }, [history]);
@@ -246,7 +272,7 @@ export default function BondLadderTracker() {
         .filter(h => h.sharesAfter?.[r.id]!==undefined && h.pricesAfter?.[r.id]!==undefined)
         .sort((a,b)=>new Date(a.date)-new Date(b.date));
       const pts = [
-        {label:"Oct 25", val:Math.round((SEED_SHARES[r.id]||0)*(SEED_PRICES[r.id]||0))},
+        {label:"May 26", val:Math.round((SEED_SHARES[r.id]||0)*5.0)},
         ...evts.map(e=>({
           label:new Date(e.date).toLocaleDateString("en-GB",{month:"short",year:"2-digit"}),
           val:Math.round((e.sharesAfter[r.id]||0)*(e.pricesAfter[r.id]||0)),
@@ -310,11 +336,11 @@ export default function BondLadderTracker() {
       {/* Summary */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10, marginBottom: 14 }}>
         {[
-          { label: "Market value",   value: "€" + Math.round(totalVal).toLocaleString(), sub: `of €${Math.round(totalPV).toLocaleString()} PV needed` },
-          { label: "Funded",         value: Math.round(totalVal / totalPV * 100) + "%",  sub: `€${Math.round(totalShort).toLocaleString()} shortfall` },
-          { label: "Months to retirement", value: monthsLeft, sub: `€${(monthsLeft * MONTHLY_BUDGET).toLocaleString()} budget left` },
-          { label: "On track?",      value: onTrack ? "Yes ✓" : "Gap ✗",
-            sub: onTrack ? `€${Math.round(netPos).toLocaleString()} surplus` : `€${Math.round(-netPos).toLocaleString()} behind`,
+          { label: "Nominal target",  value: "€" + Math.round(totalPV).toLocaleString(), sub: "shares × €5 par" },
+          { label: "Shares funded",   value: Math.round(rungs.reduce((s,r)=>s+r.sh,0)/rungs.reduce((s,r)=>s+r.sharesTarget,0)*100) + "%", sub: `${totalSharesNeeded.toLocaleString()} shares still needed` },
+          { label: "Months left",     value: monthsLeft, sub: `€${(monthsLeft * MONTHLY_BUDGET).toLocaleString()} budget remaining` },
+          { label: "Budget covers?",  value: onTrack ? "Yes ✓" : "Gap ✗",
+            sub: onTrack ? `€${Math.round(netPos).toLocaleString()} to spare` : `€${Math.round(-netPos).toLocaleString()} short — needs extra funding`,
             color: onTrack ? "var(--color-text-success)" : "var(--color-text-warning)" },
         ].map((m, i) => (
           <div key={i} style={{ background: "var(--color-background-secondary)",
@@ -325,6 +351,13 @@ export default function BondLadderTracker() {
             <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", marginTop: 2 }}>{m.sub}</div>
           </div>
         ))}
+      </div>
+
+      {/* Warning banner */}
+      <div style={{ marginBottom: 14, padding: "10px 14px", borderRadius: 8, fontSize: 12,
+          background: "var(--color-background-warning)", border: "0.5px solid #d97706",
+          color: "var(--color-text-warning)", lineHeight: 1.5 }}>
+        ⚠️ <strong>Market value ≠ retirement income.</strong> The €5 nominal target is what each rung pays out at maturity — the market value shown today will fluctuate. What matters is share count, not current price.
       </div>
 
       {/* Tabs */}
@@ -664,12 +697,7 @@ export default function BondLadderTracker() {
                       <td style={{ padding: "7px 0", borderBottom: "0.5px solid var(--color-border-tertiary)", fontWeight: 500 }}>{year}</td>
                       <td style={{ padding: "7px 0", borderBottom: "0.5px solid var(--color-border-tertiary)" }}>€{(MONTHLY_BUDGET * 12).toLocaleString()}</td>
                       <td style={{ padding: "7px 0", borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
-                        {year === 2026 ? (
-                          <span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 20,
-                              background: "var(--color-background-info)", color: "var(--color-text-info)", whiteSpace: "nowrap" }}>
-                            +€{JTC_PENSION_EUR.toLocaleString()} JTC ↓
-                          </span>
-                        ) : <span style={{ color: "var(--color-text-tertiary)" }}>—</span>}
+  <span style={{ color: "var(--color-text-tertiary)" }}>—</span>
                       </td>
                       <td style={{ padding: "7px 0", borderBottom: "0.5px solid var(--color-border-tertiary)", color: "var(--color-text-secondary)" }}>
                         {p ? p.id : <span style={{ color: "var(--color-text-success)" }}>ladder complete</span>}
@@ -699,7 +727,6 @@ export default function BondLadderTracker() {
               ["Windfall",         "Pre-fund the next year's rung early. Reduces future equity-sale pressure."],
               ["Rung matures",     "Full payout Dec of maturity year — primary income for the following calendar year."],
               ["Equity",           "Grows untouched during bond-covered years. Sell only to fund the new annual rung or cover shortfall."],
-              ["JTC pension",      "€83,143 from old employer pension expected Q1 2026. Deploy into most underfunded rungs first — likely accelerates 33GI, 34GI, 35AI to near-full funding."],
             ].map(([title, desc], i) => (
               <div key={i} style={{ display: "flex", gap: 10, padding: "8px 0",
                   borderBottom: i < 5 ? "0.5px solid var(--color-border-tertiary)" : "none" }}>
@@ -717,9 +744,9 @@ export default function BondLadderTracker() {
       {tab === "progress" && (
         <div>
           <div style={{...cardStyle, marginBottom:12}}>
-            <div style={{fontSize:13,fontWeight:500,color:"var(--color-text-primary)",marginBottom:4}}>Ladder value over time</div>
+            <div style={{fontSize:13,fontWeight:500,color:"var(--color-text-primary)",marginBottom:4}}>Ladder funding progress</div>
             <div style={{fontSize:11,color:"var(--color-text-tertiary)",marginBottom:12}}>
-              Actual (from logged entries) · Expected (€4k/mth + growth + JTC Mar 2026) · Target PV required
+              Nominal values (shares × €5 par) · Actual from logged buys · Required = linear path to full funding Dec 2031
             </div>
             <div style={{height:220}}>
               <ResponsiveContainer width="100%" height="100%">
@@ -729,16 +756,15 @@ export default function BondLadderTracker() {
                     axisLine={false} tickLine={false} interval={Math.floor(progressData.length/8)}/>
                   <YAxis tickFormatter={v=>"€"+Math.round(v/1000)+"k"}
                     tick={{fontSize:10,fill:"var(--color-text-secondary)"}}
-                    axisLine={false} tickLine={false} width={48}/>
+                    axisLine={false} tickLine={false} width={52}/>
                   <Tooltip content={({active,payload,label})=>{
                     if (!active||!payload?.length) return null;
-                    const d = progressData.find(p=>p.label===label);
-                    const actual = payload.find(p=>p.dataKey==="actual");
-                    const expected = payload.find(p=>p.dataKey==="expected");
-                    const diff = (actual?.value!=null&&expected?.value!=null) ? actual.value-expected.value : null;
+                    const actual   = payload.find(p=>p.dataKey==="actual");
+                    const required = payload.find(p=>p.dataKey==="required");
+                    const diff = (actual?.value!=null&&required?.value!=null) ? actual.value-required.value : null;
                     return (
                       <div style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:8,padding:"10px 14px",fontSize:12}}>
-                        <div style={{fontWeight:500,marginBottom:6}}>{label}{d?.isJTC?" 📌 JTC payout":""}</div>
+                        <div style={{fontWeight:500,marginBottom:6}}>{label}</div>
                         {payload.map((p,i)=>p.value!=null&&(
                           <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:2,color:"var(--color-text-secondary)"}}>
                             <span style={{width:8,height:8,borderRadius:2,background:p.color,flexShrink:0}}/>
@@ -749,32 +775,34 @@ export default function BondLadderTracker() {
                         {diff!=null&&(
                           <div style={{marginTop:6,paddingTop:6,borderTop:"0.5px solid var(--color-border-tertiary)",fontSize:11}}>
                             {diff>=0
-                              ?<span style={{color:"var(--color-text-success)"}}>▲ ahead by €{diff.toLocaleString()}</span>
-                              :<span style={{color:"var(--color-text-warning)"}}>▼ behind by €{Math.abs(diff).toLocaleString()}</span>
+                              ?<span style={{color:"var(--color-text-success)"}}>▲ ahead of schedule by €{Math.round(diff).toLocaleString()}</span>
+                              :<span style={{color:"var(--color-text-warning)"}}>▼ behind schedule by €{Math.round(Math.abs(diff)).toLocaleString()}</span>
                             }
                           </div>
                         )}
                       </div>
                     );
                   }}/>
-                  <Line type="monotone" dataKey="target"   name="Target PV"  stroke="#D3D1C7" strokeWidth={1.5} strokeDasharray="4 3" dot={false}/>
-                  <Line type="monotone" dataKey="expected" name="Expected"   stroke="#1D9E75" strokeWidth={1.5} strokeDasharray="5 3" dot={false}/>
-                  <Line type="monotone" dataKey="actual"   name="Actual"     stroke="#378ADD" strokeWidth={2.5}
+                  <Line type="monotone" dataKey="target"   name="Full target"  stroke="#D3D1C7" strokeWidth={1.5} strokeDasharray="4 3" dot={false}/>
+                  <Line type="monotone" dataKey="required" name="Required"     stroke="#D85A30" strokeWidth={1.5} strokeDasharray="5 3" dot={false}/>
+                  <Line type="monotone" dataKey="expected" name="Expected (€4k/mth)" stroke="#1D9E75" strokeWidth={1.5} strokeDasharray="5 3" dot={false}/>
+                  <Line type="monotone" dataKey="actual"   name="Actual"       stroke="#378ADD" strokeWidth={2.5}
                     dot={(props)=>{
                       const {cx,cy,payload}=props;
                       if (payload.actual==null) return null;
-                      if (payload.isJTC) return <circle key={cx+cy} cx={cx} cy={cy} r={6} fill="#BA7517" stroke="white" strokeWidth={1.5}/>;
                       return <circle key={cx+cy} cx={cx} cy={cy} r={3.5} fill="#378ADD" stroke="white" strokeWidth={1.5}/>;
                     }}
                     connectNulls={false}/>
-                  <ReferenceLine x={progressData.find(d=>d.isJTC)?.label} stroke="#BA7517"
-                    strokeDasharray="3 3"
-                    label={{value:"JTC",position:"insideTopRight",fontSize:10,fill:"#BA7517"}}/>
                 </LineChart>
               </ResponsiveContainer>
             </div>
             <div style={{display:"flex",flexWrap:"wrap",gap:"5px 16px",marginTop:10}}>
-              {[{color:"#378ADD",label:"Actual",solid:true},{color:"#1D9E75",label:"Expected (€4k/mth + JTC)",solid:false},{color:"#D3D1C7",label:"Target PV",solid:false}].map((x,i)=>(
+              {[
+                {color:"#378ADD",label:"Actual (logged buys)",solid:true},
+                {color:"#D85A30",label:"Required (on-schedule)",solid:false},
+                {color:"#1D9E75",label:"Expected (€4k/mth)",solid:false},
+                {color:"#D3D1C7",label:"Full target",solid:false},
+              ].map((x,i)=>(
                 <span key={i} style={{fontSize:11,display:"flex",alignItems:"center",gap:5,color:"var(--color-text-secondary)"}}>
                   <svg width={20} height={10}>
                     {x.solid
@@ -787,7 +815,7 @@ export default function BondLadderTracker() {
               ))}
             </div>
             <div style={{fontSize:11,color:"var(--color-text-tertiary)",marginTop:8}}>
-              Actual line builds as you log buys each month. Orange dot marks the JTC pension arrival. Hover for ahead/behind detail.
+              All values in nominal terms (shares × €5 par). Actual builds as you log buys. Required = straight line to full funding by Dec 2031.
             </div>
           </div>
 

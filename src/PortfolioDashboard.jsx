@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, LineChart, Line, AreaChart, Area } from "recharts";
 import { storage } from "./storage.js";
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, LineChart, Line, AreaChart, Area } from "recharts";
 
 // ─── FX (updated via API too) ─────────────────────────────────────────────────
 const FX_DEFAULTS = { USD: 1/1.1615, SGD: 1/1.4840, EUR: 1.0 }; // EUR/USD 1.1615, EUR/SGD 1.4840 as of 22 May 2026
@@ -100,13 +100,13 @@ const GEO_COLORS    = ["#378ADD","#1D9E75","#7F77DD","#D85A30","#BA7517","#5DCAA
 const SECTOR_COLORS = ["#378ADD","#1D9E75","#7F77DD","#D85A30","#BA7517","#5DCAA5","#AFA9EC","#FAC775","#B5D4F4","#D3D1C7"];
 const CCY_COLORS    = { USD: "#378ADD", EUR: "#1D9E75", SGD: "#FAC775" };
 
-// ─── Fallback prices (used if live fetch fails) ───────────────────────────────
-// Last updated: 22 May 2026
+// ─── Fallback prices (used when live fetch unavailable) ──────────────────────
+// Last updated: 26 May 2026
 const FALLBACK_PRICES = {
   prices: {
     ibkr_spyi:  11.01,
     ibkr_emim:  47.04,
-    ibkr_vwcg:  56.63,
+    ibkr_vwcg:  58.32,
     bond_31ig:  5.0276,
     bond_32xg:  4.9947,
     bond_33gi:  4.9675,
@@ -117,23 +117,21 @@ const FALLBACK_PRICES = {
     srs_nav:    12.00,
     jtc_nav:    28.00,
   },
-  fx: { USD: 1.1615, SGD: 1.4840 },
-  timestamp: "2026-05-22T09:00:00.000Z",
+  fx: { USD: 1.1640, SGD: 1.4870 },
+  timestamp: "2026-05-26T09:00:00.000Z",
 };
 
-// ─── Live price fetcher — calls Vercel serverless proxy → Yahoo Finance ────────
+// ─── Live price fetcher — Vercel serverless → Twelve Data (real-time) ─────────
 async function fetchLivePrices() {
   const resp = await fetch('/api/prices');
-  if (!resp.ok) throw new Error(`API returned ${resp.status}`);
+  if (!resp.ok) throw new Error(`API ${resp.status}`);
   const live = await resp.json();
   if (live.error) throw new Error(live.error);
-
-  // Merge live prices with fallback for any nulls (k401_nav, srs_nav, jtc_nav)
+  // Merge: live prices override fallback; nulls (k401, srs, jtc) keep fallback
   const merged = { ...FALLBACK_PRICES.prices };
   for (const [k, v] of Object.entries(live.prices || {})) {
     if (v != null) merged[k] = v;
   }
-
   return {
     prices: merged,
     fx: {
@@ -338,14 +336,6 @@ export default function PortfolioDashboard() {
   useEffect(() => {
     if (!loading && priceStatus === "idle") refreshPrices();
   }, [loading]);
-
-  // Auto-refresh if prices are stale (> 4 hours old)
-  useEffect(() => {
-    if (!loading && priceStatus === "ok" && priceTime) {
-      const ageHours = (Date.now() - new Date(priceTime).getTime()) / 3600000;
-      if (ageHours > 4) refreshPrices();
-    }
-  }, [loading, priceStatus]);
 
   // ── Compute EUR values from shares × price ────────────────────────────────
   const liveValues = useMemo(() => {
@@ -607,7 +597,7 @@ export default function PortfolioDashboard() {
   const priceAge = priceTime ? Math.round((Date.now() - new Date(priceTime).getTime()) / 60000) : null;
 
   return (
-    <div style={{ fontFamily: "var(--font-sans)", padding: "1rem 0", maxWidth: 680 }}>
+    <div style={{ fontFamily: "var(--font-sans)", padding: "1rem 0", maxWidth: 700 }}>
 
       {/* ── HEADER ── */}
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14 }}>
@@ -629,16 +619,16 @@ export default function PortfolioDashboard() {
         <div style={{ width:8, height:8, borderRadius:"50%", flexShrink:0,
           background: priceStatus==="ok" ? "#1D9E75" : priceStatus==="fetching" ? "#BA7517" : priceStatus==="error" ? "#D85A30" : "#888" }} />
         <div style={{ flex:1, fontSize:11, color:"var(--color-text-secondary)" }}>
-          {priceStatus==="fetching" && "Fetching live prices…"}
-          {priceStatus==="ok"       && `Live prices · ${priceTime ? new Date(priceTime).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"}) + " " + new Date(priceTime).toLocaleDateString("en-GB",{day:"numeric",month:"short"}) : "—"} · 1 EUR = ${(1/fx.USD).toFixed(4)} USD = ${(1/fx.SGD).toFixed(4)} SGD`}
-          {priceStatus==="error"    && `Using fallback prices (${priceError}) · FX: 1 EUR = ${(1/fx.USD).toFixed(4)} USD`}
-          {priceStatus==="idle"     && "Loading prices…"}
+          {priceStatus==="fetching" && "Fetching live prices from Twelve Data…"}
+          {priceStatus==="ok"       && `Live · ${priceTime ? new Date(priceTime).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"}) + " " + new Date(priceTime).toLocaleDateString("en-GB",{day:"numeric",month:"short"}) : ""} · 1 EUR = ${(1/fx.USD).toFixed(4)} USD = ${(1/fx.SGD).toFixed(4)} SGD`}
+          {priceStatus==="error"    && `Fallback prices shown · live fetch failed (${priceError})`}
+          {priceStatus==="idle"     && "Prices not yet loaded"}
         </div>
         <button onClick={refreshPrices} disabled={priceStatus==="fetching"}
           style={{ fontSize:11, padding:"4px 10px", cursor:"pointer", borderRadius:6,
             border:"0.5px solid var(--color-border-secondary)", background:"transparent",
             color:"var(--color-text-secondary)", opacity: priceStatus==="fetching" ? 0.5 : 1 }}>
-          {priceStatus==="fetching" ? "…" : "Refresh ↻"}
+          {priceStatus==="fetching" ? "…" : "Apply prices ↻"}
         </button>
       </div>
 
@@ -769,12 +759,12 @@ export default function PortfolioDashboard() {
         <div>
           <Card style={{ marginBottom:12 }}>
             <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12 }}>
-              <SectionTitle sub="prices hardcoded — ask Claude to update · click Apply to reload from latest seed">Instrument prices</SectionTitle>
+              <SectionTitle sub="auto-fetched from Yahoo Finance on load · PIMCO NAVs updated manually · click Refresh to update now">Instrument prices</SectionTitle>
               <button onClick={refreshPrices} disabled={priceStatus==="fetching"}
                 style={{ fontSize:12,padding:"6px 14px",cursor:"pointer",fontWeight:500,borderRadius:8,
                   border:"0.5px solid var(--color-border-secondary)",background:"transparent",
                   color: priceStatus==="fetching" ? "var(--color-text-tertiary)" : "var(--color-text-primary)" }}>
-                {priceStatus==="fetching" ? "Applying…" : "Apply prices ↻"}
+                {priceStatus==="fetching" ? "Fetching…" : "Refresh prices ↻"}
               </button>
             </div>
             <table style={{ width:"100%",fontSize:12,borderCollapse:"collapse" }}>
@@ -831,7 +821,7 @@ export default function PortfolioDashboard() {
               </tbody>
             </table>
             <div style={{ fontSize:11,color:"var(--color-text-tertiary)",marginTop:8 }}>
-              Click share count to edit. Prices auto-update via web search on each load.
+              ETF prices auto-fetch from Yahoo Finance on load. PIMCO NAVs (SRS, JTC) are manual — update from Endowus/JTC statement.
             </div>
           </Card>
 

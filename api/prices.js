@@ -1,73 +1,78 @@
-// Vercel serverless function — proxies Yahoo Finance to avoid CORS
-// Called by the app on load: GET /api/prices
+// Vercel serverless function — fetches live prices from Twelve Data
+// Free tier: 800 calls/day, real-time prices
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 's-maxage=300'); // cache 5 mins on Vercel edge
+  res.setHeader('Cache-Control', 's-maxage=60'); // cache 1 min on Vercel edge
 
-  const tickers = [
-    'SPYI.DE',   // SPYI Xetra
-    'EMIM.AS',   // EMIM Euronext Amsterdam
-    'VWCG.DE',   // VWCG Xetra
-    '31IG.DE',   // iBond 2031
-    '32XG.DE',   // iBond 2032
-    '33GI.DE',   // iBond 2033
-    '34GI.DE',   // iBond 2034
-    '35AI.DE',   // iBond 2035
-    'MAR',       // Marriott NASDAQ
-    'EURUSD=X',  // EUR/USD
-    'EURSGD=X',  // EUR/SGD
+  const API_KEY = process.env.TWELVE_DATA_KEY;
+  if (!API_KEY) {
+    res.status(500).json({ error: 'TWELVE_DATA_KEY not configured' });
+    return;
+  }
+
+  // Twelve Data symbol format: SYMBOL/CURRENCY:EXCHANGE
+  // Xetra ETFs need the EUR suffix and XETRA exchange
+  const symbols = [
+    'SPYI/EUR:XETRA',   // iShares MSCI ACWI IMI
+    'EMIM/EUR:XETR',    // iShares MSCI EM IMI (Euronext Amsterdam)
+    'VWCG/EUR:XETRA',   // Vanguard FTSE Developed Europe
+    '31IG/EUR:XETRA',   // iBond 2031
+    '32XG/EUR:XETRA',   // iBond 2032
+    '33GI/EUR:XETRA',   // iBond 2033
+    '34GI/EUR:XETRA',   // iBond 2034
+    '35AI/EUR:XETRA',   // iBond 2035
+    'MAR:NASDAQ',       // Marriott
+    'EUR/USD:Forex',    // EUR/USD
+    'EUR/SGD:Forex',    // EUR/SGD
   ];
 
-  const url = `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${tickers.join(',')}&range=1d&interval=1d`;
+  const url = `https://api.twelvedata.com/price?symbol=${encodeURIComponent(symbols.join(','))}&apikey=${API_KEY}`;
 
   try {
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'application/json',
-      }
-    });
-
-    if (!response.ok) throw new Error(`Yahoo returned ${response.status}`);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Twelve Data returned ${response.status}`);
     const data = await response.json();
 
-    const spark = data?.spark?.result || [];
-    const out = {};
+    // Helper to extract price, handling both single and batch responses
+    const get = (key) => {
+      const entry = data[key];
+      if (!entry || entry.status === 'error') return null;
+      const p = parseFloat(entry.price);
+      return isNaN(p) ? null : p;
+    };
 
-    for (const item of spark) {
-      const symbol = item.symbol;
-      const closes = item.response?.[0]?.meta?.regularMarketPrice
-        ?? item.response?.[0]?.indicators?.quote?.[0]?.close?.filter(Boolean)?.slice(-1)?.[0];
-      if (closes != null) out[symbol] = closes;
-    }
-
-    // Map Yahoo symbols to our internal keys
     const prices = {
-      ibkr_spyi:  out['SPYI.DE'],
-      ibkr_emim:  out['EMIM.AS'],
-      ibkr_vwcg:  out['VWCG.DE'],
-      bond_31ig:  out['31IG.DE'],
-      bond_32xg:  out['32XG.DE'],
-      bond_33gi:  out['33GI.DE'],
-      bond_34gi:  out['34GI.DE'],
-      bond_35ai:  out['35AI.DE'],
-      rsu_mar:    out['MAR'],
+      ibkr_spyi:  get('SPYI/EUR:XETRA'),
+      ibkr_emim:  get('EMIM/EUR:XETR'),
+      ibkr_vwcg:  get('VWCG/EUR:XETRA'),
+      bond_31ig:  get('31IG/EUR:XETRA'),
+      bond_32xg:  get('32XG/EUR:XETRA'),
+      bond_33gi:  get('33GI/EUR:XETRA'),
+      bond_34gi:  get('34GI/EUR:XETRA'),
+      bond_35ai:  get('35AI/EUR:XETRA'),
+      rsu_mar:    get('MAR:NASDAQ'),
       k401_nav:   null,  // Fidelity — manual only
       srs_nav:    null,  // PIMCO SGD — manual only
       jtc_nav:    null,  // PIMCO EUR — manual only
     };
 
     const fx = {
-      USD: out['EURUSD=X'] || null,
-      SGD: out['EURSGD=X'] || null,
+      USD: get('EUR/USD:Forex'),
+      SGD: get('EUR/SGD:Forex'),
     };
+
+    // Count how many prices we actually got
+    const fetched = Object.values(prices).filter(v => v !== null).length
+      + Object.values(fx).filter(v => v !== null).length;
 
     res.status(200).json({
       prices,
       fx,
       timestamp: new Date().toISOString(),
-      source: 'yahoo',
+      source: 'twelvedata',
+      fetched,
+      raw: data, // include raw for debugging
     });
 
   } catch (err) {
