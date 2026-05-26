@@ -930,7 +930,6 @@ export default function BondLadderTracker() {
           )}
         </div>
       )}
-      )}
     </div>
   );
 }
