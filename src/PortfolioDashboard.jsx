@@ -5,7 +5,7 @@ import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis
 // ─── FX (updated via API too) ─────────────────────────────────────────────────
 const FX_DEFAULTS = { USD: 1/1.1615, SGD: 1/1.4840, EUR: 1.0 }; // EUR/USD 1.1615, EUR/SGD 1.4840 as of 22 May 2026
 // Bump this when data model changes to bust stale storage
-const STORAGE_VERSION = "v5";
+const STORAGE_VERSION = "v6";
 const fmt  = (n) => "€" + Math.round(n).toLocaleString();
 const fmtM = (n) => "€" + (Math.round(n) / 1e6).toFixed(2) + "M";
 
