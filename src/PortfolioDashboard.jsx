@@ -100,47 +100,24 @@ const GEO_COLORS    = ["#378ADD","#1D9E75","#7F77DD","#D85A30","#BA7517","#5DCAA
 const SECTOR_COLORS = ["#378ADD","#1D9E75","#7F77DD","#D85A30","#BA7517","#5DCAA5","#AFA9EC","#FAC775","#B5D4F4","#D3D1C7"];
 const CCY_COLORS    = { USD: "#378ADD", EUR: "#1D9E75", SGD: "#FAC775" };
 
-// ─── Fallback prices (used when live fetch unavailable) ──────────────────────
-// Last updated: 26 May 2026
-const FALLBACK_PRICES = {
-  prices: {
-    ibkr_spyi:  11.01,
-    ibkr_emim:  47.04,
-    ibkr_vwcg:  58.32,
-    bond_31ig:  5.0276,
-    bond_32xg:  4.9947,
-    bond_33gi:  4.9675,
-    bond_34gi:  4.9601,
-    bond_35ai:  4.9567,
-    rsu_mar:    369.92,
-    k401_nav:   7.1610,
-    srs_nav:    12.00,
-    jtc_nav:    28.00,
-  },
-  fx: { USD: 1.1640, SGD: 1.4870 },
-  timestamp: "2026-05-26T09:00:00.000Z",
+// ─── Seed prices — shown until user updates via screenshot or manual entry ────
+// Prices stored in localStorage under "pf2_prices_manual"
+// Last manually updated: 30 May 2026
+const SEED_PRICES_MAP = {
+  ibkr_spyi: { price: 11.01,  ccy: "EUR", label: "SPYI" },
+  ibkr_emim: { price: 47.04,  ccy: "EUR", label: "EMIM" },
+  ibkr_vwcg: { price: 58.32,  ccy: "EUR", label: "VWCG" },
+  bond_31ig:  { price: 5.0276, ccy: "EUR", label: "31IG" },
+  bond_32xg:  { price: 4.9947, ccy: "EUR", label: "32XG" },
+  bond_33gi:  { price: 4.9675, ccy: "EUR", label: "33GI" },
+  bond_34gi:  { price: 4.9601, ccy: "EUR", label: "34GI" },
+  bond_35ai:  { price: 4.9567, ccy: "EUR", label: "35AI" },
+  rsu_mar:    { price: 369.92, ccy: "USD", label: "MAR"  },
+  k401_nav:   { price: 7.161,  ccy: "USD", label: "401k NAV" },
+  srs_nav:    { price: 12.00,  ccy: "SGD", label: "PIMCO SGD" },
+  jtc_nav:    { price: 28.00,  ccy: "EUR", label: "PIMCO EUR" },
 };
-
-// ─── Live price fetcher — Vercel serverless → Twelve Data (real-time) ─────────
-async function fetchLivePrices() {
-  const resp = await fetch('/api/prices');
-  if (!resp.ok) throw new Error(`API ${resp.status}`);
-  const live = await resp.json();
-  if (live.error) throw new Error(live.error);
-  // Merge: live prices override fallback; nulls (k401, srs, jtc) keep fallback
-  const merged = { ...FALLBACK_PRICES.prices };
-  for (const [k, v] of Object.entries(live.prices || {})) {
-    if (v != null) merged[k] = v;
-  }
-  return {
-    prices: merged,
-    fx: {
-      USD: live.fx?.USD ?? FALLBACK_PRICES.fx.USD,
-      SGD: live.fx?.SGD ?? FALLBACK_PRICES.fx.SGD,
-    },
-    timestamp: live.timestamp || new Date().toISOString(),
-  };
-}
+const SEED_FX = { USD: 1.1640, SGD: 1.4870 };
 
 // ─── Tooltip ──────────────────────────────────────────────────────────────────
 const ChartTip = ({ active, payload, label }) => {
@@ -242,8 +219,15 @@ export default function PortfolioDashboard() {
   const [prices, setPrices]       = useState({});
   const [fx, setFx]               = useState(FX_DEFAULTS);
   const [priceStatus, setPriceStatus] = useState("idle");
-  const [priceTime, setPriceTime] = useState(null);
-  const [priceError, setPriceError] = useState(null);
+  const [priceTime, setPriceTime]     = useState(null);
+  const [priceError, setPriceError]   = useState(null);
+  // Manual price map: { ibkr_spyi: 11.01, ... } — loaded from localStorage
+  const [priceMap, setPriceMap]       = useState({});
+  const [fxMap, setFxMap]             = useState({});
+  // Screenshot parsing state
+  const [screenshotParsing, setScreenshotParsing] = useState(false);
+  const [screenshotResult,  setScreenshotResult]  = useState(null);
+  const [screenshotError,   setScreenshotError]   = useState(null);
 
   const [shareCount, setShareCount] = useState(DEFAULT_SHARES);
   const [manualVals, setManualVals] = useState(
@@ -309,32 +293,34 @@ export default function PortfolioDashboard() {
     setSaving(false);
   }
 
-  // ── Live price fetch ───────────────────────────────────────────────────────
-  const refreshPrices = useCallback(async () => {
-    setPriceStatus("fetching");
-    setPriceError(null);
-    try {
-      const result = await fetchLivePrices();
-      setPrices(result.prices || {});
-      if (result.fx) {
-        setFx({
-          USD: result.fx.USD ? 1 / result.fx.USD : FX_DEFAULTS.USD,
-          SGD: result.fx.SGD ? 1 / result.fx.SGD : FX_DEFAULTS.SGD,
-          EUR: 1,
-        });
-      }
-      setPriceTime(result.timestamp || new Date().toISOString());
-      setPriceStatus("ok");
-      // Note: prices are not cached to storage — they come from LATEST_PRICES constant
-    } catch (e) {
-      setPriceStatus("error");
-      setPriceError(e.message);
-    }
-  }, []);
-
+  // ── Load saved prices from localStorage ──────────────────────────────────
   useEffect(() => {
-    if (!loading && priceStatus === "idle") refreshPrices();
+    if (loading) return;
+    try {
+      const saved = localStorage.getItem("pf2_prices_manual");
+      if (saved) {
+        const d = JSON.parse(saved);
+        setPriceMap(d.prices || {});
+        setFxMap(d.fx || {});
+        setPriceTime(d.timestamp || null);
+      }
+      setPriceStatus("ok");
+    } catch (_) { setPriceStatus("ok"); }
   }, [loading]);
+
+  function savePrices(newPriceMap, newFxMap, ts) {
+    const data = { prices: newPriceMap, fx: newFxMap, timestamp: ts || new Date().toISOString() };
+    try { localStorage.setItem("pf2_prices_manual", JSON.stringify(data)); } catch (_) {}
+    setPriceMap(newPriceMap);
+    setFxMap(newFxMap);
+    setPriceTime(data.timestamp);
+  }
+
+  function getPrice(key) { return priceMap[key] ?? SEED_PRICES_MAP[key]?.price ?? 0; }
+  function getEffFx(ccy) {
+    if (ccy === "EUR") return 1;
+    return fxMap[ccy] ? 1 / fxMap[ccy] : FX_DEFAULTS[ccy];
+  }
 
   // ── Compute EUR values from shares × price ────────────────────────────────
   const liveValues = useMemo(() => {
@@ -344,16 +330,17 @@ export default function PortfolioDashboard() {
         : inst.id === "srs_pimco" ? "srs_nav"
         : inst.id === "jtc_pimco" ? "jtc_nav"
         : inst.id;
-      const price = prices[priceKey];
+      const price = getPrice(priceKey);
       const sh    = shareCount[inst.id] || 0;
       if (price && sh) {
+        const fxRate = getEffFx(inst.ccy);
         const native = sh * price;
-        const fxRate = inst.ccy === "EUR" ? 1 : (fx[inst.ccy] || FX_DEFAULTS[inst.ccy]);
         out[inst.id] = { native, eur: Math.round(native * fxRate), price, shares: sh, ccy: inst.ccy };
       }
     }
     return out;
-  }, [prices, shareCount, fx]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [priceMap, fxMap, shareCount]);
 
   const bondTotal = useMemo(() => {
     const ids = ["bond_31ig","bond_32xg","bond_33gi","bond_34gi","bond_35ai"];
@@ -380,7 +367,7 @@ export default function PortfolioDashboard() {
     return 0;
   }
 
-  const toEUR = (val, ccy) => Math.round(val * (fx[ccy] || FX_DEFAULTS[ccy] || 1));
+  const toEUR = (val, ccy) => Math.round(val * getEffFx(ccy));
 
   const accounts = useMemo(() => ACCOUNT_DEFS.map(def => {
     const eurVal = getEurVal(def);
@@ -593,8 +580,6 @@ export default function PortfolioDashboard() {
 
   if (loading) return <div style={{padding:"2rem",fontSize:14,color:"var(--color-text-secondary)"}}>Loading…</div>;
 
-  const priceAge = priceTime ? Math.round((Date.now() - new Date(priceTime).getTime()) / 60000) : null;
-
   return (
     <div style={{ fontFamily: "var(--font-sans)", padding: "1rem 0", maxWidth: 700 }}>
 
@@ -615,19 +600,18 @@ export default function PortfolioDashboard() {
       <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14, padding:"8px 12px",
           borderRadius:8, background:"var(--color-background-secondary)",
           border:"0.5px solid var(--color-border-tertiary)" }}>
-        <div style={{ width:8, height:8, borderRadius:"50%", flexShrink:0,
-          background: priceStatus==="ok" ? "#1D9E75" : priceStatus==="fetching" ? "#BA7517" : priceStatus==="error" ? "#D85A30" : "#888" }} />
+        <div style={{ width:8, height:8, borderRadius:"50%", flexShrink:0, background: "#1D9E75" }} />
         <div style={{ flex:1, fontSize:11, color:"var(--color-text-secondary)" }}>
-          {priceStatus==="fetching" && "Fetching live prices from Twelve Data…"}
-          {priceStatus==="ok"       && `Live · ${priceTime ? new Date(priceTime).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"}) + " " + new Date(priceTime).toLocaleDateString("en-GB",{day:"numeric",month:"short"}) : ""} · 1 EUR = ${(1/fx.USD).toFixed(4)} USD = ${(1/fx.SGD).toFixed(4)} SGD`}
-          {priceStatus==="error"    && `Fallback prices shown · live fetch failed (${priceError})`}
-          {priceStatus==="idle"     && "Prices not yet loaded"}
+          {priceTime
+            ? `Prices updated ${new Date(priceTime).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})} · 1 EUR = ${(fxMap.USD||SEED_FX.USD).toFixed(4)} USD = ${(fxMap.SGD||SEED_FX.SGD).toFixed(4)} SGD`
+            : `Seed prices active · go to Live Prices tab to upload a screenshot or edit manually`
+          }
         </div>
-        <button onClick={refreshPrices} disabled={priceStatus==="fetching"}
+        <button onClick={()=>setTab("prices")}
           style={{ fontSize:11, padding:"4px 10px", cursor:"pointer", borderRadius:6,
             border:"0.5px solid var(--color-border-secondary)", background:"transparent",
-            color:"var(--color-text-secondary)", opacity: priceStatus==="fetching" ? 0.5 : 1 }}>
-          {priceStatus==="fetching" ? "…" : "Apply prices ↻"}
+            color:"var(--color-text-secondary)", whiteSpace:"nowrap" }}>
+          Update ↗
         </button>
       </div>
 
@@ -756,106 +740,333 @@ export default function PortfolioDashboard() {
       {/* ══ LIVE PRICES ══ */}
       {tab==="prices" && (
         <div>
-          <Card style={{ marginBottom:12 }}>
-            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12 }}>
-              <SectionTitle sub="auto-fetched from Yahoo Finance on load · PIMCO NAVs updated manually · click Refresh to update now">Instrument prices</SectionTitle>
-              <button onClick={refreshPrices} disabled={priceStatus==="fetching"}
-                style={{ fontSize:12,padding:"6px 14px",cursor:"pointer",fontWeight:500,borderRadius:8,
-                  border:"0.5px solid var(--color-border-secondary)",background:"transparent",
-                  color: priceStatus==="fetching" ? "var(--color-text-tertiary)" : "var(--color-text-primary)" }}>
-                {priceStatus==="fetching" ? "Fetching…" : "Refresh prices ↻"}
-              </button>
+
+          {/* ── Screenshot upload ── */}
+          <Card style={{marginBottom:12}}>
+            <SectionTitle sub="upload an IBKR screenshot — Claude reads prices and share counts automatically">Update from screenshot</SectionTitle>
+            <div style={{marginBottom:10,fontSize:12,color:"var(--color-text-secondary)"}}>
+              Take a screenshot from IBKR, Fidelity, or Endowus showing prices and/or positions. Claude will extract what it can and update the dashboard.
             </div>
-            <table style={{ width:"100%",fontSize:12,borderCollapse:"collapse" }}>
+            <label style={{display:"block",border:"1.5px dashed var(--color-border-secondary)",borderRadius:10,
+                padding:"20px",textAlign:"center",cursor:"pointer",marginBottom:10,
+                background:"var(--color-background-secondary)"}}>
+              <input type="file" accept="image/*" style={{display:"none"}}
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  setScreenshotParsing(true);
+                  setScreenshotResult(null);
+                  setScreenshotError(null);
+                  try {
+                    // Read file as base64
+                    const base64 = await new Promise((res, rej) => {
+                      const reader = new FileReader();
+                      reader.onload = () => res(reader.result.split(",")[1]);
+                      reader.onerror = rej;
+                      reader.readAsDataURL(file);
+                    });
+
+                    const prompt = `This is a screenshot from a financial app (IBKR, Fidelity, or Endowus).
+Extract ALL prices, share/unit counts, and FX rates visible. Return ONLY valid JSON, no markdown.
+
+Return this exact structure (omit fields not visible, use null for missing):
+{
+  "prices": {
+    "ibkr_spyi": null,
+    "ibkr_emim": null,
+    "ibkr_vwcg": null,
+    "bond_31ig": null,
+    "bond_32xg": null,
+    "bond_33gi": null,
+    "bond_34gi": null,
+    "bond_35ai": null,
+    "rsu_mar": null,
+    "k401_nav": null,
+    "srs_nav": null,
+    "jtc_nav": null
+  },
+  "shares": {
+    "k401": null,
+    "ibkr_spyi": null,
+    "ibkr_emim": null,
+    "ibkr_vwcg": null,
+    "bond_31ig": null,
+    "bond_32xg": null,
+    "bond_33gi": null,
+    "bond_34gi": null,
+    "bond_35ai": null,
+    "rsu_mar": null,
+    "srs_pimco": null,
+    "jtc_pimco": null
+  },
+  "fx": {
+    "USD": null,
+    "SGD": null
+  },
+  "notes": "brief description of what was found"
+}
+
+Instrument hints:
+- SPYI = iShares MSCI ACWI IMI on Xetra (EUR)
+- EMIM = iShares MSCI EM IMI on Euronext (EUR)
+- VWCG = Vanguard FTSE Developed Europe (EUR)
+- 31IG/32XG/33GI/34GI/35AI = iBonds on Xetra (EUR, price ~€5)
+- MAR = Marriott International (USD)
+- k401_nav = MRS iShares World Eq Indx Fd USD Cl8 NAV per unit (USD)
+- srs_nav = PIMCO GIS Income Fund SGD-Hedged NAV per unit (SGD)
+- jtc_nav = PIMCO GIS Global Bond Inst Hdg Acc EUR NAV per unit (EUR)
+- fx.USD = how many USD per 1 EUR (e.g. 1.16)
+- fx.SGD = how many SGD per 1 EUR (e.g. 1.48)`;
+
+                    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        model: "claude-sonnet-4-20250514",
+                        max_tokens: 1000,
+                        messages: [{
+                          role: "user",
+                          content: [
+                            { type: "image", source: { type: "base64", media_type: file.type || "image/jpeg", data: base64 } },
+                            { type: "text", text: prompt }
+                          ]
+                        }]
+                      })
+                    });
+
+                    const data = await resp.json();
+                    const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+                    const clean = text.replace(/```json|```/g, "").trim();
+                    const parsed = JSON.parse(clean);
+
+                    // Apply extracted prices
+                    const newPriceMap = { ...priceMap };
+                    let updated = [];
+                    for (const [k, v] of Object.entries(parsed.prices || {})) {
+                      if (v !== null && v > 0) { newPriceMap[k] = v; updated.push(k); }
+                    }
+
+                    // Apply extracted shares
+                    const newShareCount = { ...shareCount };
+                    const newManualVals = { ...manualVals };
+                    for (const [k, v] of Object.entries(parsed.shares || {})) {
+                      if (v !== null && v > 0) { newShareCount[k] = v; updated.push(k + " shares"); }
+                    }
+
+                    // Apply FX
+                    const newFxMap = { ...fxMap };
+                    for (const [k, v] of Object.entries(parsed.fx || {})) {
+                      if (v !== null && v > 0) { newFxMap[k] = v; }
+                    }
+
+                    savePrices(newPriceMap, newFxMap, new Date().toISOString());
+                    setShareCount(newShareCount);
+                    persistAll(newShareCount, newManualVals, contribs);
+
+                    setScreenshotResult({ updated, notes: parsed.notes });
+                  } catch (err) {
+                    setScreenshotError(err.message);
+                  }
+                  setScreenshotParsing(false);
+                  e.target.value = "";
+                }}
+              />
+              {screenshotParsing ? (
+                <div style={{fontSize:13,color:"var(--color-text-secondary)"}}>Reading screenshot…</div>
+              ) : (
+                <div>
+                  <div style={{fontSize:28,marginBottom:6}}>📷</div>
+                  <div style={{fontSize:13,fontWeight:500}}>Tap to upload screenshot</div>
+                  <div style={{fontSize:11,color:"var(--color-text-tertiary)",marginTop:4}}>IBKR · Fidelity · Endowus</div>
+                </div>
+              )}
+            </label>
+            {screenshotResult && (
+              <div style={{padding:"10px 14px",borderRadius:8,background:"var(--color-background-success)",
+                  border:"0.5px solid var(--color-text-success)",fontSize:12}}>
+                <div style={{fontWeight:600,color:"var(--color-text-success)",marginBottom:4}}>✓ Updated {screenshotResult.updated.length} fields</div>
+                <div style={{color:"var(--color-text-secondary)"}}>{screenshotResult.notes}</div>
+                <div style={{fontSize:11,color:"var(--color-text-tertiary)",marginTop:4}}>{screenshotResult.updated.join(" · ")}</div>
+              </div>
+            )}
+            {screenshotError && (
+              <div style={{padding:"10px 14px",borderRadius:8,background:"var(--color-background-warning)",
+                  border:"0.5px solid #d97706",fontSize:12,color:"var(--color-text-warning)"}}>
+                ✗ Could not read screenshot: {screenshotError}
+              </div>
+            )}
+          </Card>
+
+          {/* ── Manual price editing ── */}
+          <Card style={{marginBottom:12}}>
+            <SectionTitle sub="tap any value to edit · prices and shares saved locally">Manual price & share entry</SectionTitle>
+            <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",fontSize:12,borderCollapse:"collapse",minWidth:420}}>
               <thead>
-                <tr>{["Instrument","Exchange","Shares","Last price","Market value","Status"].map(h=>(
-                  <th key={h} style={{ fontSize:10,fontWeight:500,color:"var(--color-text-tertiary)",textAlign:"left",
-                      paddingBottom:6,borderBottom:"0.5px solid var(--color-border-tertiary)",
-                      textTransform:"uppercase",letterSpacing:".04em" }}>{h}</th>
+                <tr>{["Instrument","Shares / Units","Price","CCY","Market value EUR"].map(h=>(
+                  <th key={h} style={{fontSize:10,fontWeight:500,color:"var(--color-text-tertiary)",textAlign:"left",
+                      paddingBottom:6,paddingRight:8,borderBottom:"0.5px solid var(--color-border-tertiary)",
+                      textTransform:"uppercase",letterSpacing:".04em"}}>{h}</th>
                 ))}</tr>
               </thead>
               <tbody>
                 {LIVE_INSTRUMENTS.map(inst => {
-                  const lv   = liveValues[inst.id];
-                  const sh   = shareCount[inst.id] || 0;
-                  const isEd = editingShares===inst.id;
+                  const priceKey = inst.id==="k401" ? "k401_nav" : inst.id==="srs_pimco" ? "srs_nav" : inst.id==="jtc_pimco" ? "jtc_nav" : inst.id;
+                  const currentPrice = getPrice(priceKey);
+                  const currentShares = shareCount[inst.id] || 0;
+                  const eurVal = currentShares > 0 && currentPrice > 0
+                    ? Math.round(currentShares * currentPrice * getEffFx(inst.ccy)) : null;
+                  const isEditingPr = editingShares === (inst.id + "_price");
+                  const isEditingSh = editingShares === inst.id;
                   return (
                     <tr key={inst.id}>
-                      <td style={{ padding:"7px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",fontWeight:500 }}>
-                        {inst.label}
-                        <div style={{ fontSize:10,color:"var(--color-text-tertiary)" }}>{inst.exchange} · {inst.ccy}</div>
+                      <td style={{padding:"7px 8px 7px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        <div style={{fontWeight:500}}>{inst.label}</div>
+                        <div style={{fontSize:10,color:"var(--color-text-tertiary)"}}>{inst.exchange}</div>
                       </td>
-                      <td style={{ padding:"7px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",color:"var(--color-text-secondary)",fontSize:11 }}>{inst.exchange}</td>
-                      <td style={{ padding:"7px 0",borderBottom:"0.5px solid var(--color-border-tertiary)" }}>
-                        {isEd ? (
-                          <div style={{ display:"flex",gap:4 }}>
-                            <input type="number" value={sharesDraft[inst.id]??""} onChange={e=>setSharesDraft(p=>({...p,[inst.id]:e.target.value}))}
+                      {/* Shares */}
+                      <td style={{padding:"7px 8px 7px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        {isEditingSh ? (
+                          <div style={{display:"flex",gap:4}}>
+                            <input type="number" value={sharesDraft[inst.id]??""} autoFocus
+                              onChange={e=>setSharesDraft(p=>({...p,[inst.id]:e.target.value}))}
                               onKeyDown={e=>{if(e.key==="Enter")saveShares(inst.id);if(e.key==="Escape"){setEditingShares(null);setSharesDraft({});}}}
-                              style={{ width:80,fontSize:12,padding:"3px 6px" }} autoFocus/>
-                            <button onClick={()=>saveShares(inst.id)} style={{ fontSize:11,padding:"3px 8px",cursor:"pointer" }}>✓</button>
+                              style={{width:80,fontSize:12,padding:"3px 6px"}}/>
+                            <button onClick={()=>saveShares(inst.id)} style={{fontSize:11,padding:"3px 8px",cursor:"pointer"}}>✓</button>
                           </div>
                         ) : (
-                          <span onClick={()=>{setEditingShares(inst.id);setSharesDraft({[inst.id]:sh});}} style={{ cursor:"pointer",borderBottom:"1px dashed var(--color-border-secondary)" }}>
-                            {sh.toLocaleString()}
+                          <span onClick={()=>{setEditingShares(inst.id);setSharesDraft({[inst.id]:currentShares});}}
+                            style={{cursor:"pointer",borderBottom:"1px dashed var(--color-border-secondary)"}}>
+                            {currentShares.toLocaleString()}
                           </span>
                         )}
                       </td>
-                      <td style={{ padding:"7px 0",borderBottom:"0.5px solid var(--color-border-tertiary)" }}>
-                        {lv ? <span style={{ fontWeight:500 }}>{inst.ccy==="EUR"?"€":inst.ccy==="USD"?"$":"S$"}{lv.price.toFixed(4)}</span>
-                             : <span style={{ color:"var(--color-text-tertiary)",fontSize:11 }}>—</span>}
+                      {/* Price */}
+                      <td style={{padding:"7px 8px 7px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        {isEditingPr ? (
+                          <div style={{display:"flex",gap:4}}>
+                            <input type="number" step="0.0001" value={sharesDraft[inst.id+"_price"]??""} autoFocus
+                              onChange={e=>setSharesDraft(p=>({...p,[inst.id+"_price"]:e.target.value}))}
+                              onKeyDown={e=>{
+                                if (e.key==="Enter") {
+                                  const v = parseFloat(sharesDraft[inst.id+"_price"]);
+                                  if (!isNaN(v) && v > 0) {
+                                    const nm = {...priceMap, [priceKey]: v};
+                                    savePrices(nm, fxMap);
+                                  }
+                                  setEditingShares(null); setSharesDraft({});
+                                }
+                                if (e.key==="Escape"){setEditingShares(null);setSharesDraft({});}
+                              }}
+                              style={{width:80,fontSize:12,padding:"3px 6px"}}/>
+                            <button onClick={()=>{
+                              const v = parseFloat(sharesDraft[inst.id+"_price"]);
+                              if (!isNaN(v) && v > 0) { const nm = {...priceMap, [priceKey]: v}; savePrices(nm, fxMap); }
+                              setEditingShares(null); setSharesDraft({});
+                            }} style={{fontSize:11,padding:"3px 8px",cursor:"pointer"}}>✓</button>
+                          </div>
+                        ) : (
+                          <span onClick={()=>{setEditingShares(inst.id+"_price");setSharesDraft({[inst.id+"_price"]:currentPrice});}}
+                            style={{cursor:"pointer",borderBottom:"1px dashed var(--color-border-secondary)"}}>
+                            {currentPrice ? currentPrice.toFixed(inst.ccy==="USD"||inst.ccy==="SGD"?2:4) : "—"}
+                          </span>
+                        )}
                       </td>
-                      <td style={{ padding:"7px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",fontWeight:500 }}>
-                        {lv ? fmt(lv.eur) : <span style={{ color:"var(--color-text-tertiary)" }}>—</span>}
-                      </td>
-                      <td style={{ padding:"7px 0",borderBottom:"0.5px solid var(--color-border-tertiary)" }}>
-                        <span style={{ fontSize:10,padding:"2px 7px",borderRadius:20,
-                          background: lv?"var(--color-background-success)":"var(--color-background-secondary)",
-                          color: lv?"var(--color-text-success)":"var(--color-text-tertiary)" }}>
-                          {lv?"live":"pending"}
-                        </span>
+                      <td style={{padding:"7px 8px 7px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",
+                          color:"var(--color-text-tertiary)",fontSize:11}}>{inst.ccy}</td>
+                      <td style={{padding:"7px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",fontWeight:500}}>
+                        {eurVal ? fmt(eurVal) : <span style={{color:"var(--color-text-tertiary)"}}>—</span>}
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
-            <div style={{ fontSize:11,color:"var(--color-text-tertiary)",marginTop:8 }}>
-              ETF prices auto-fetch from Yahoo Finance on load. PIMCO NAVs (SRS, JTC) are manual — update from Endowus/JTC statement.
+            </div>
+            <div style={{fontSize:11,color:"var(--color-text-tertiary)",marginTop:8}}>
+              Tap any shares or price value to edit inline. Changes save automatically.
             </div>
           </Card>
 
+          {/* ── FX rates ── */}
+          <Card style={{marginBottom:12}}>
+            <SectionTitle sub="tap to edit · used for all EUR conversions">FX rates (EUR/X)</SectionTitle>
+            {["USD","SGD"].map(ccy => {
+              const current = fxMap[ccy] ?? SEED_FX[ccy];
+              const isEd = editingShares === ("fx_" + ccy);
+              return (
+                <div key={ccy} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                    padding:"8px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                  <span style={{fontWeight:500}}>1 EUR = ? {ccy}</span>
+                  {isEd ? (
+                    <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                      <input type="number" step="0.0001" autoFocus
+                        value={sharesDraft["fx_"+ccy]??""} 
+                        onChange={e=>setSharesDraft(p=>({...p,["fx_"+ccy]:e.target.value}))}
+                        onKeyDown={e=>{
+                          if(e.key==="Enter"){
+                            const v=parseFloat(sharesDraft["fx_"+ccy]);
+                            if(!isNaN(v)&&v>0){savePrices(priceMap,{...fxMap,[ccy]:v});}
+                            setEditingShares(null);setSharesDraft({});
+                          }
+                          if(e.key==="Escape"){setEditingShares(null);setSharesDraft({});}
+                        }}
+                        style={{width:90,fontSize:12,padding:"4px 8px"}}/>
+                      <button onClick={()=>{
+                        const v=parseFloat(sharesDraft["fx_"+ccy]);
+                        if(!isNaN(v)&&v>0){savePrices(priceMap,{...fxMap,[ccy]:v});}
+                        setEditingShares(null);setSharesDraft({});
+                      }} style={{fontSize:12,padding:"4px 10px",cursor:"pointer",fontWeight:500}}>Save</button>
+                    </div>
+                  ) : (
+                    <span onClick={()=>{setEditingShares("fx_"+ccy);setSharesDraft({["fx_"+ccy]:current});}}
+                      style={{cursor:"pointer",fontWeight:500,borderBottom:"1px dashed var(--color-border-secondary)"}}>
+                      {current?.toFixed(4)}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+            {priceTime && (
+              <div style={{fontSize:11,color:"var(--color-text-tertiary)",marginTop:8}}>
+                Last updated: {new Date(priceTime).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})}
+              </div>
+            )}
+          </Card>
+
+          {/* ── Manual positions (non-live) ── */}
           <Card>
-            <SectionTitle sub="update manually from Fidelity / Endowus screens">Manual positions</SectionTitle>
-            {Object.entries(MANUAL_DEFAULTS).map(([id, def]) => {
+            <SectionTitle sub="update manually from Fidelity / Endowus screens">Other positions</SectionTitle>
+            {Object.entries(MANUAL_DEFAULTS).filter(([id]) => !LIVE_INSTRUMENTS.find(i=>i.id===id)).map(([id, def]) => {
               const acc  = ACCOUNT_DEFS.find(a=>a.id===id);
               const curr = manualVals[id] || 0;
               const isEd = editingManual===id;
               return (
-                <div key={id} style={{ display:"flex",alignItems:"center",gap:10,padding:"8px 10px",borderRadius:8,
-                    marginBottom:4,border:"0.5px solid var(--color-border-tertiary)" }}>
-                  <span style={{ width:9,height:9,borderRadius:2,background:acc?.color||"#888",flexShrink:0 }}/>
-                  <div style={{ flex:1 }}>
-                    <div style={{ fontSize:12,fontWeight:500 }}>{acc?.label||id}</div>
-                    <div style={{ fontSize:10,color:"var(--color-text-tertiary)" }}>{acc?.notes}</div>
+                <div key={id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",borderRadius:8,
+                    marginBottom:4,border:"0.5px solid var(--color-border-tertiary)"}}>
+                  <span style={{width:9,height:9,borderRadius:2,background:acc?.color||"#888",flexShrink:0}}/>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:12,fontWeight:500}}>{acc?.label||id}</div>
+                    <div style={{fontSize:10,color:"var(--color-text-tertiary)"}}>{acc?.notes}</div>
                   </div>
                   {isEd ? (
-                    <div style={{ display:"flex",alignItems:"center",gap:6 }}>
+                    <div style={{display:"flex",alignItems:"center",gap:6}}>
                       <input type="number" value={manualDraft[id]??""} onChange={e=>setManualDraft(p=>({...p,[id]:e.target.value}))}
                         onKeyDown={e=>{if(e.key==="Enter")saveManual(id);if(e.key==="Escape"){setEditingManual(null);setManualDraft({});}}}
-                        style={{ width:110,fontSize:12,padding:"4px 8px" }} autoFocus/>
-                      <span style={{ fontSize:11,color:"var(--color-text-tertiary)" }}>{def.ccy}</span>
-                      <button onClick={()=>saveManual(id)} style={{ fontSize:11,padding:"4px 10px",cursor:"pointer",fontWeight:500 }}>Save</button>
-                      <button onClick={()=>{setEditingManual(null);setManualDraft({});}} style={{ fontSize:11,padding:"4px 8px",cursor:"pointer",color:"var(--color-text-secondary)" }}>✕</button>
+                        style={{width:110,fontSize:12,padding:"4px 8px"}} autoFocus/>
+                      <span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>{def.ccy}</span>
+                      <button onClick={()=>saveManual(id)} style={{fontSize:11,padding:"4px 10px",cursor:"pointer",fontWeight:500}}>Save</button>
+                      <button onClick={()=>{setEditingManual(null);setManualDraft({});}} style={{fontSize:11,padding:"4px 8px",cursor:"pointer",color:"var(--color-text-secondary)"}}>✕</button>
                     </div>
                   ) : (
-                    <div style={{ display:"flex",alignItems:"center",gap:10 }}>
-                      <div style={{ textAlign:"right" }}>
-                        <div style={{ fontSize:13,fontWeight:500 }}>{curr.toLocaleString()} {def.ccy}</div>
-                        <div style={{ fontSize:10,color:"var(--color-text-tertiary)" }}>{fmt(toEUR(curr,def.ccy))}</div>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <div style={{textAlign:"right"}}>
+                        <div style={{fontSize:13,fontWeight:500}}>{curr.toLocaleString()} {def.ccy}</div>
+                        <div style={{fontSize:10,color:"var(--color-text-tertiary)"}}>{fmt(toEUR(curr,def.ccy))}</div>
                       </div>
                       <button onClick={()=>{setEditingManual(id);setManualDraft({[id]:curr});}}
-                        style={{ fontSize:11,padding:"4px 10px",cursor:"pointer",borderRadius:6,
-                          border:"0.5px solid var(--color-border-secondary)",background:"transparent",color:"var(--color-text-secondary)" }}>
+                        style={{fontSize:11,padding:"4px 10px",cursor:"pointer",borderRadius:6,
+                          border:"0.5px solid var(--color-border-secondary)",background:"transparent",color:"var(--color-text-secondary)"}}>
                         Edit
                       </button>
                     </div>
