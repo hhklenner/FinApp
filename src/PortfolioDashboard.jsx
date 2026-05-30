@@ -274,39 +274,38 @@ export default function PortfolioDashboard() {
   const [blShares, setBlShares] = useState(BL_SEED_SHARES);
   const [blPrices, setBlPrices] = useState(BL_SEED_PRICES);
 
-  // ── Storage ────────────────────────────────────────────────────────────────
+  // ── Storage — uses localStorage directly for reliability ─────────────────
   useEffect(() => {
-    async function load() {
-      try {
-        // Version check — clear stale cache if model changed
-        const ver = await storage.get("pf2_version");
-        if (!ver || ver.value !== STORAGE_VERSION) {
-          await storage.delete("pf2_shares");
-          await storage.delete("pf2_manual");
-          await storage.delete("pf2_contribs");
-          await storage.set("pf2_version", STORAGE_VERSION);
-          setLoading(false);
-          return;
-        }
-        const sc = await storage.get("pf2_shares");   if (sc) setShareCount(JSON.parse(sc.value));
-        const mv = await storage.get("pf2_manual");   if (mv) setManualVals(JSON.parse(mv.value));
-        const co = await storage.get("pf2_contribs"); if (co) setContribs(JSON.parse(co.value));
-        const sn = await storage.get("pf2_snapshots"); if (sn) setSnapshots(JSON.parse(sn.value));
-        const bls = await storage.get("bl_shares"); if (bls) setBlShares({...BL_SEED_SHARES, ...JSON.parse(bls.value)});
-        const blp = await storage.get("bl_prices"); if (blp) setBlPrices({...BL_SEED_PRICES, ...JSON.parse(blp.value)});
-      } catch (_) {}
-      setLoading(false);
+    function lsGet(key) {
+      try { return localStorage.getItem(key); } catch (_) { return null; }
     }
-    load();
+    function lsSet(key, val) {
+      try { localStorage.setItem(key, val); } catch (_) {}
+    }
+
+    // Version check
+    const ver = lsGet("pf2_version");
+    if (ver !== STORAGE_VERSION) {
+      localStorage.removeItem("pf2_shares");
+      localStorage.removeItem("pf2_manual");
+      localStorage.removeItem("pf2_contribs");
+      lsSet("pf2_version", STORAGE_VERSION);
+    } else {
+      try { const v = lsGet("pf2_shares");    if (v) setShareCount(JSON.parse(v)); } catch (_) {}
+      try { const v = lsGet("pf2_manual");    if (v) setManualVals(JSON.parse(v)); } catch (_) {}
+      try { const v = lsGet("pf2_contribs");  if (v) setContribs(JSON.parse(v));   } catch (_) {}
+      try { const v = lsGet("pf2_snapshots"); if (v) setSnapshots(JSON.parse(v));  } catch (_) {}
+      try { const v = lsGet("bl_shares");     if (v) setBlShares({...BL_SEED_SHARES, ...JSON.parse(v)}); } catch (_) {}
+      try { const v = lsGet("bl_prices");     if (v) setBlPrices({...BL_SEED_PRICES, ...JSON.parse(v)}); } catch (_) {}
+    }
+    setLoading(false);
   }, []);
 
   async function persistAll(sc, mv, co) {
     setSaving(true);
-    try {
-      await storage.set("pf2_shares",  JSON.stringify(sc));
-      await storage.set("pf2_manual",  JSON.stringify(mv));
-      await storage.set("pf2_contribs",JSON.stringify(co));
-    } catch (_) {}
+    try { localStorage.setItem("pf2_shares",   JSON.stringify(sc)); } catch (_) {}
+    try { localStorage.setItem("pf2_manual",   JSON.stringify(mv)); } catch (_) {}
+    try { localStorage.setItem("pf2_contribs", JSON.stringify(co)); } catch (_) {}
     setSaving(false);
   }
 
@@ -576,12 +575,12 @@ export default function PortfolioDashboard() {
     const next = [...snapshots, snap];
     setSnapshots(next);
     setSnapNote("");
-    storage.set("pf2_snapshots", JSON.stringify(next)).catch(()=>{});
+    try { localStorage.setItem("pf2_snapshots", JSON.stringify(next)); } catch(_) {}
   }
   function deleteSnapshot(idx) {
     const next = snapshots.filter((_,i) => i !== idx);
     setSnapshots(next);
-    storage.set("pf2_snapshots", JSON.stringify(next)).catch(()=>{});
+    try { localStorage.setItem("pf2_snapshots", JSON.stringify(next)); } catch(_) {}
   }
 
   const tabStyle = (id) => ({
