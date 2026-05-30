@@ -1,4 +1,13 @@
 // Vercel serverless function — proxies image to Anthropic API for price extraction
+
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: '10mb',
+    },
+  },
+};
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -8,15 +17,25 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'POST only' }); return; }
 
   const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
-  if (!ANTHROPIC_KEY) { res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' }); return; }
+  if (!ANTHROPIC_KEY) {
+    res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
+    return;
+  }
 
-  const { base64, mediaType } = req.body;
-  if (!base64) { res.status(400).json({ error: 'Missing base64 image data' }); return; }
+  // Body is already parsed by Vercel when Content-Type is application/json
+  const body = req.body;
+  const base64 = body?.base64;
+  const mediaType = body?.mediaType || 'image/jpeg';
+
+  if (!base64) {
+    res.status(400).json({ error: 'Missing base64 image data', bodyKeys: Object.keys(body || {}) });
+    return;
+  }
 
   const prompt = `This is a screenshot from a financial app (IBKR, Fidelity, or Endowus).
-Extract ALL prices, share/unit counts, and FX rates visible. Return ONLY valid JSON, no markdown.
+Extract ALL prices, share/unit counts, and FX rates visible. Return ONLY valid JSON, no markdown, no explanation.
 
-Return this exact structure (use null for fields not visible):
+Return exactly this structure (use null for fields not visible):
 {
   "prices": {
     "ibkr_spyi": null, "ibkr_emim": null, "ibkr_vwcg": null,
@@ -34,7 +53,7 @@ Return this exact structure (use null for fields not visible):
 
 Instrument hints:
 - SPYI = iShares MSCI ACWI IMI on Xetra (EUR)
-- EMIM = iShares MSCI EM IMI on Euronext (EUR)
+- EMIM = iShares MSCI EM IMI on Euronext (EUR)  
 - VWCG = Vanguard FTSE Developed Europe (EUR)
 - 31IG/32XG/33GI/34GI/35AI = iBonds on Xetra (EUR, price ~5)
 - MAR = Marriott International (USD)
@@ -52,27 +71,36 @@ Instrument hints:
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 800,
         messages: [{
           role: 'user',
           content: [
-            { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: base64 } },
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
             { type: 'text', text: prompt }
           ]
         }]
       })
     });
 
+    const data = await response.json();
+
     if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`Anthropic ${response.status}: ${err.slice(0, 100)}`);
+      res.status(500).json({ error: `Anthropic error: ${data?.error?.message || response.status}` });
+      return;
     }
 
-    const data = await response.json();
     const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
     const clean = text.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+
+    let parsed;
+    try {
+      parsed = JSON.parse(clean);
+    } catch (e) {
+      res.status(500).json({ error: `Could not parse response: ${clean.slice(0, 100)}` });
+      return;
+    }
+
     res.status(200).json(parsed);
 
   } catch (err) {
