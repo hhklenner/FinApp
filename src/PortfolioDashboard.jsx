@@ -766,78 +766,18 @@ export default function PortfolioDashboard() {
                       reader.readAsDataURL(file);
                     });
 
-                    const prompt = `This is a screenshot from a financial app (IBKR, Fidelity, or Endowus).
-Extract ALL prices, share/unit counts, and FX rates visible. Return ONLY valid JSON, no markdown.
-
-Return this exact structure (omit fields not visible, use null for missing):
-{
-  "prices": {
-    "ibkr_spyi": null,
-    "ibkr_emim": null,
-    "ibkr_vwcg": null,
-    "bond_31ig": null,
-    "bond_32xg": null,
-    "bond_33gi": null,
-    "bond_34gi": null,
-    "bond_35ai": null,
-    "rsu_mar": null,
-    "k401_nav": null,
-    "srs_nav": null,
-    "jtc_nav": null
-  },
-  "shares": {
-    "k401": null,
-    "ibkr_spyi": null,
-    "ibkr_emim": null,
-    "ibkr_vwcg": null,
-    "bond_31ig": null,
-    "bond_32xg": null,
-    "bond_33gi": null,
-    "bond_34gi": null,
-    "bond_35ai": null,
-    "rsu_mar": null,
-    "srs_pimco": null,
-    "jtc_pimco": null
-  },
-  "fx": {
-    "USD": null,
-    "SGD": null
-  },
-  "notes": "brief description of what was found"
-}
-
-Instrument hints:
-- SPYI = iShares MSCI ACWI IMI on Xetra (EUR)
-- EMIM = iShares MSCI EM IMI on Euronext (EUR)
-- VWCG = Vanguard FTSE Developed Europe (EUR)
-- 31IG/32XG/33GI/34GI/35AI = iBonds on Xetra (EUR, price ~€5)
-- MAR = Marriott International (USD)
-- k401_nav = MRS iShares World Eq Indx Fd USD Cl8 NAV per unit (USD)
-- srs_nav = PIMCO GIS Income Fund SGD-Hedged NAV per unit (SGD)
-- jtc_nav = PIMCO GIS Global Bond Inst Hdg Acc EUR NAV per unit (EUR)
-- fx.USD = how many USD per 1 EUR (e.g. 1.16)
-- fx.SGD = how many SGD per 1 EUR (e.g. 1.48)`;
-
-                    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+                    const resp = await fetch("/api/parse-screenshot", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({
-                        model: "claude-sonnet-4-20250514",
-                        max_tokens: 1000,
-                        messages: [{
-                          role: "user",
-                          content: [
-                            { type: "image", source: { type: "base64", media_type: file.type || "image/jpeg", data: base64 } },
-                            { type: "text", text: prompt }
-                          ]
-                        }]
+                        base64,
+                        mediaType: file.type || "image/jpeg",
                       })
                     });
 
-                    const data = await resp.json();
-                    const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-                    const clean = text.replace(/```json|```/g, "").trim();
-                    const parsed = JSON.parse(clean);
+                    if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+                    const parsed = await resp.json();
+                    if (parsed.error) throw new Error(parsed.error);
 
                     // Apply extracted prices
                     const newPriceMap = { ...priceMap };
